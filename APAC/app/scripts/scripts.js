@@ -6,19 +6,38 @@ const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct"
 const formatMonth = (date) => `${MONTH_NAMES[date.getMonth()]} ${date.getFullYear()}`;
 const getAllMonthsOfYear = (year) => MONTH_NAMES.map(m => `${m} ${year}`);
 
+/**
+ * Returns number of weeks in a month (4 or 5)
+ */
+function getWeeksInMonth(year, monthIndex) {
+    const firstDay = new Date(year, monthIndex, 1).getDay();
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    return Math.ceil((firstDay + daysInMonth) / 7);
+}
+
+/**
+ * Returns week number (1–5) within the month
+ */
+function getWeekOfMonth(date) {
+    const firstDay = new Date(date.getFullYear(), date.getMonth(), 1).getDay();
+    return Math.ceil((date.getDate() + firstDay) / 7);
+}
+
 
 /*************************************
- * COQL DATA FETCH (OPTIMIZED)
+ * COQL DATA FETCH (CURRENT YEAR ONLY)
  *************************************/
-async function fetchFilteredLeadsCOQL(year) {
+async function fetchFilteredLeadsCOQL() {
+
+    const year = new Date().getFullYear();
 
     const leadSources = [
-        "Zoho Leads", "Zoho Partner", "Zoho CRM", "Zoho Partners 2024",
-        "Zoho - Sutha", "Zoho - Hemanth", "Zoho - Sen", "Zoho - Audrey",
-        "Zoho - Jacklyn", "Zoho - Adrian", "Zoho Partner Website", "Zoho - Chaitanya"
+        "Zoho Leads","Zoho Partner","Zoho CRM","Zoho Partners 2024",
+        "Zoho - Sutha","Zoho - Hemanth","Zoho - Sen","Zoho - Audrey",
+        "Zoho - Jacklyn","Zoho - Adrian","Zoho Partner Website","Zoho - Chaitanya"
     ];
 
-    const zohoServices = ["CRM", "CRMPlus", "One", "Bigin"];
+    const zohoServices = ["CRM","CRMPlus","One","Bigin"];
 
     const startDate = `${year}-01-01T00:00:00+00:00`;
     const endDate   = `${year}-12-31T23:59:59+00:00`;
@@ -32,20 +51,20 @@ async function fetchFilteredLeadsCOQL(year) {
     let hasMore = true;
 
     while (hasMore) {
+
         const query = `
-            SELECT Created_Time, Lead_Source, Zoho_Service
+            SELECT Created_Time
             FROM Leads
             WHERE Lead_Source IN (${sourceList})
               AND Zoho_Service IN (${serviceList})
               AND Created_Time BETWEEN '${startDate}' AND '${endDate}'
-            LIMIT ${offset}, ${limit}
+            LIMIT ${limit} OFFSET ${offset}
         `;
 
         const resp = await ZOHO.CRM.API.coql({ select_query: query });
-
         const data = resp?.data || [];
-        allData.push(...data);
 
+        allData.push(...data);
         hasMore = data.length === limit;
         offset += limit;
     }
@@ -54,33 +73,32 @@ async function fetchFilteredLeadsCOQL(year) {
 }
 
 
+
 /********************************************
- * GROUP LEADS BY MONTH & WEEK (UNCHANGED)
+ * GROUP LEADS BY MONTH & WEEK (4–5 WEEKS)
  ********************************************/
 function groupLeadsByMonthWeek(leads, year) {
 
-    const grouped = Object.fromEntries(
-        getAllMonthsOfYear(year).map(m => [m, {1:0,2:0,3:0,4:0}])
-    );
+    const grouped = {};
+
+    MONTH_NAMES.forEach((m, idx) => {
+        const monthKey = `${m} ${year}`;
+        const weeks = getWeeksInMonth(year, idx);
+        grouped[monthKey] = {};
+        for (let w = 1; w <= weeks; w++) grouped[monthKey][w] = 0;
+    });
 
     leads.forEach(lead => {
-        const createdTimeValue = lead.Created_Time;
-        if (!createdTimeValue) return;
+        if (!lead.Created_Time) return;
 
-        try {
-            const dateString = createdTimeValue.split(/[+Z]/)[0].replace("T"," ");
-            const createdDate = new Date(dateString);
+        const date = new Date(lead.Created_Time);
+        if (isNaN(date) || date.getFullYear() !== year) return;
 
-            if (isNaN(createdDate.getTime()) || createdDate.getFullYear() !== year) return;
+        const monthKey = formatMonth(date);
+        const week = getWeekOfMonth(date);
 
-            const monthKey = formatMonth(createdDate);
-            if (!grouped[monthKey]) return;
-
-            const week = Math.min(4, Math.max(1, Math.ceil(createdDate.getDate() / 7)));
+        if (grouped[monthKey]?.[week] !== undefined) {
             grouped[monthKey][week]++;
-
-        } catch (e) {
-            console.error("Date parsing error:", e);
         }
     });
 
@@ -109,7 +127,7 @@ function getPercentChange(current, previous) {
 
 
 /*************************************
- * TABLE RENDERING
+ * TABLE RENDERING (DYNAMIC WEEKS)
  *************************************/
 function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
 
@@ -129,65 +147,39 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
     const tbody = table.querySelector("tbody");
 
     const months = getAllMonthsOfYear(year);
+    const maxWeeks = 5;
 
     thead.innerHTML = `
         <tr style="background:#4CAF50;color:white;">
-            <th style="padding:12px;border:1px solid #ddd;">Week</th>
-            ${months.map(m => `<th style="padding:12px;border:1px solid #ddd;">${m}</th>`).join("")}
+            <th>Week</th>
+            ${months.map(m => `<th>${m}</th>`).join("")}
         </tr>
     `;
 
-    for (let week = 1; week <= 4; week++) {
+    for (let week = 1; week <= maxWeeks; week++) {
 
         const row = months.map((m, idx) => {
-            const count = monthlyWeeklyCounts[m]?.[week] || 0;
+            const count = monthlyWeeklyCounts[m]?.[week] ?? "";
             let prev = null;
 
-            if (week > 1) {
-                prev = monthlyWeeklyCounts[m]?.[week - 1] || 0;
-            } else if (idx > 0) {
-                const prevMonth = months[idx - 1];
-                prev = monthlyWeeklyCounts[prevMonth]?.[4] || 0;
-            }
+            if (week > 1) prev = monthlyWeeklyCounts[m]?.[week - 1] ?? null;
+            else if (idx > 0) prev = monthlyWeeklyCounts[months[idx - 1]]?.[5] ?? null;
 
-            return `<td style="padding:10px;border:1px solid #ddd;text-align:center;">
-                        ${count}${getPercentChange(count, prev)}
+            return `<td style="text-align:center;">
+                        ${count !== "" ? count + getPercentChange(count, prev) : ""}
                     </td>`;
         }).join("");
 
         tbody.innerHTML += `
-            <tr style="background:${week % 2 ? "#fff" : "#f9f9f9"};">
-                <td style="padding:10px;border:1px solid #ddd;font-weight:bold;text-align:center;">Week ${week}</td>
+            <tr>
+                <td style="font-weight:bold;text-align:center;">Week ${week}</td>
                 ${row}
             </tr>
         `;
     }
 
-    let grandTotal = 0;
-
-    const totalRow = months.map((m,i) => {
-        const total = Object.values(monthlyWeeklyCounts[m]).reduce((a,b)=>a+b,0);
-        grandTotal += total;
-
-        const prev = i > 0
-            ? Object.values(monthlyWeeklyCounts[months[i-1]]).reduce((a,b)=>a+b,0)
-            : null;
-
-        return `<td style="padding:12px;border:1px solid #ddd;text-align:center;">
-                    <strong>${total}${getPercentChange(total, prev)}</strong>
-                </td>`;
-    }).join("");
-
-    tbody.innerHTML += `
-        <tr style="background:#e0e0e0;font-weight:bold;">
-            <td style="padding:12px;border:1px solid #ddd;text-align:center;">Monthly Total</td>
-            ${totalRow}
-        </tr>
-    `;
-
     document.querySelector("#footerNote").innerHTML = `
         <div style="background:#f5f5f5;padding:20px;border-radius:8px;">
-            <strong>Filtered Leads:</strong> ${grandTotal}<br>
             <strong>Total Records Retrieved:</strong> ${totalFiltered}<br>
             <strong>Period:</strong> Jan–Dec ${year}<br>
             <strong>Generated:</strong> ${new Date().toLocaleString()}
@@ -211,17 +203,7 @@ ZOHO.embeddedApp.on("PageLoad", async () => {
     `;
 
     try {
-        const leads = await fetchFilteredLeadsCOQL(targetYear);
-
-        if (!leads.length) {
-            document.body.innerHTML = `
-                <div style="padding:40px;text-align:center;">
-                    <h2>No Matching Leads Found</h2>
-                </div>
-            `;
-            return;
-        }
-
+        const leads = await fetchFilteredLeadsCOQL();
         const grouped = groupLeadsByMonthWeek(leads, targetYear);
         renderTable(grouped, targetYear, leads.length);
 

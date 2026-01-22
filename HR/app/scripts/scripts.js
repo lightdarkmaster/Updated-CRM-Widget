@@ -1,9 +1,29 @@
+/***********************
+ * CONSTANTS & HELPERS
+ ***********************/
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-
 const formatMonth = (date) => `${MONTH_NAMES[date.getMonth()]} ${date.getFullYear()}`;
 const getAllMonthsOfYear = (year) => MONTH_NAMES.map(m => `${m} ${year}`);
 
-async function fetchFilteredLeads() {
+// Get total weeks in a month (4 or 5)
+function getWeeksInMonth(year, monthIndex) {
+    const firstDay = new Date(year, monthIndex, 1).getDay();
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    return Math.ceil((firstDay + daysInMonth) / 7);
+}
+
+// Get week number of the month for a date (1–5)
+function getWeekOfMonth(date) {
+    const firstDay = new Date(date.getFullYear(), date.getMonth(), 1).getDay();
+    return Math.ceil((date.getDate() + firstDay) / 7);
+}
+
+/*************************************
+ * FETCH FILTERED LEADS USING COQL
+ *************************************/
+async function fetchFilteredLeadsCOQL() {
+    const year = new Date().getFullYear();
+
     const leadSources = [
         "Zoho Leads", "Zoho Partner", "Zoho CRM", "Zoho Partners 2024",
         "Zoho - Sutha", "Zoho - Hemanth", "Zoho - Sen", "Zoho - Audrey",
@@ -11,98 +31,79 @@ async function fetchFilteredLeads() {
     ];
     const zohoServices = ["People", "Recruit", "Expense"];
 
-    let allData = [];
-    let page = 1;
-    let hasMore = true;
+    const startDate = `${year}-01-01T00:00:00+00:00`;
+    const endDate   = `${year}-12-31T23:59:59+00:00`;
 
-    while (hasMore) {
-        try {
-            const resp = await ZOHO.CRM.API.getAllRecords({
-                Entity: "Leads",
-                per_page: 200,
-                page: page
-            });
+    const sourceList  = leadSources.map(v => `'${v}'`).join(",");
+    const serviceList = zohoServices.map(v => `'${v}'`).join(",");
 
-            if (resp && resp.data && resp.data.length > 0) {
-                const filteredData = resp.data.filter(lead => {
-                    const leadSource = lead.Lead_Source || lead['Lead Source'] || lead.lead_source || "";
-                    const zohoService = lead.Zoho_Service || lead['Zoho Service'] || lead.zoho_service || "";
-                    
-                    const matchesLeadSource = leadSources.includes(leadSource);
-                    const matchesZohoService = zohoServices.includes(zohoService);
-                    
-                    return matchesLeadSource && matchesZohoService;
-                });
+    const query = `
+        SELECT Created_Time, Lead_Source, Zoho_Service
+        FROM Leads
+        WHERE Lead_Source IN (${sourceList})
+          AND Zoho_Service IN (${serviceList})
+          AND Created_Time BETWEEN '${startDate}' AND '${endDate}'
+    `;
 
-                allData.push(...filteredData);
-                hasMore = resp.data.length === 200;
-                page++;
-                
-                if (page > 100) break;
-            } else {
-                hasMore = false;
-            }
-        } catch (err) {
-            console.error(`Error fetching page ${page}:`, err);
-            break;
-        }
+    try {
+        const resp = await ZOHO.CRM.API.coql({ select_query: query });
+        return resp?.data || [];
+    } catch (err) {
+        console.error("Error fetching leads via COQL:", err);
+        return [];
     }
-
-    return allData;
 }
 
+/********************************************
+ * GROUP LEADS BY MONTH & WEEK (4–5 WEEKS)
+ ********************************************/
 function groupLeadsByMonthWeek(leads, year) {
-    const grouped = Object.fromEntries(
-        getAllMonthsOfYear(year).map(m => [m, {1:0,2:0,3:0,4:0}])
-    );
+    const grouped = {};
+    MONTH_NAMES.forEach((m, idx) => {
+        const monthKey = `${m} ${year}`;
+        const weeks = getWeeksInMonth(year, idx);
+        grouped[monthKey] = {};
+        for (let w = 1; w <= weeks; w++) grouped[monthKey][w] = 0;
+    });
 
     leads.forEach(lead => {
-        const createdTimeValue = lead.Created_Time || lead.created_time || 
-                                lead.Created_Date || lead.created_date;
-        
-        if (!createdTimeValue) return;
+        const createdTime = lead.Created_Time;
+        if (!createdTime) return;
 
-        try {
-            let dateString = createdTimeValue;
-            if (typeof dateString === 'string') {
-                dateString = dateString.split(/[+Z]/)[0].replace('T', ' ');
-            }
-            
-            const createdDate = new Date(dateString);
-            
-            if (isNaN(createdDate.getTime()) || createdDate.getFullYear() !== year) return;
+        const date = new Date(createdTime);
+        if (isNaN(date.getTime()) || date.getFullYear() !== year) return;
 
-            const monthKey = formatMonth(createdDate);
-            if (!grouped[monthKey]) return;
-
-            const week = Math.min(4, Math.max(1, Math.ceil(createdDate.getDate() / 7)));
-            grouped[monthKey][week]++;
-        } catch (dateErr) {
-            console.error('Date parsing error:', dateErr);
-        }
+        const monthKey = formatMonth(date);
+        const week = getWeekOfMonth(date);
+        if (grouped[monthKey]?.[week] !== undefined) grouped[monthKey][week]++;
     });
 
     return grouped;
 }
 
+/*************************************
+ * PERCENT CHANGE HELPER
+ *************************************/
 function getPercentChange(current, previous) {
     if (previous == null) return "";
-    if (previous === 0) {
-        if (current > 0) return ` <span style="color:green; font-weight:bold;">(+∞)</span>`;
-        return ` <span style="color:gray;">(0%)</span>`;
-    }
+    if (previous === 0) return current > 0
+        ? ` <span style="color:green;font-weight:bold;">(+∞)</span>`
+        : ` <span style="color:gray;">(0%)</span>`;
     const change = (((current - previous) / previous) * 100).toFixed(1);
     const color = change > 0 ? "green" : change < 0 ? "red" : "gray";
-    return ` <span style="color:${color}; font-weight:bold;">(${change > 0 ? "+" : ""}${change}%)</span>`;
+    return ` <span style="color:${color};font-weight:bold;">(${change > 0 ? "+" : ""}${change}%)</span>`;
 }
 
+/*************************************
+ * TABLE RENDERING (DYNAMIC WEEKS)
+ *************************************/
 function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
     let table = document.querySelector("#leadsTable");
     if (!table) {
         document.body.innerHTML += `
-            <div style="margin: 20px;">
+            <div style="margin:20px;">
                 <h2>Lead Generation Report - ${year}</h2>
-                <table id="leadsTable" style="border-collapse: collapse; width: 100%; margin: 20px 0;">
+                <table id="leadsTable" style="border-collapse:collapse;width:100%;margin:20px 0;">
                     <thead></thead><tbody></tbody>
                 </table>
                 <div id="footerNote"></div>
@@ -115,41 +116,37 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
     thead.innerHTML = tbody.innerHTML = "";
 
     const months = getAllMonthsOfYear(year);
+    const maxWeeks = Math.max(...months.map(m => Object.keys(monthlyWeeklyCounts[m]).length));
 
+    // Table Header
     thead.innerHTML = `<tr style="background:#4CAF50;color:white;">
         <th style="padding:12px;border:1px solid #ddd;text-align:center;">Week</th>
         ${months.map(m => `<th style="padding:12px;border:1px solid #ddd;text-align:center;">${m}</th>`).join("")}
     </tr>`;
 
-    for (let week = 1; week <= 4; week++) {
-        const row = months.map((m, monthIndex) => {
-            const count = monthlyWeeklyCounts[m]?.[week] || 0;
+    // Week Rows
+    for (let week = 1; week <= maxWeeks; week++) {
+        const row = months.map((m, idx) => {
+            const count = monthlyWeeklyCounts[m]?.[week] ?? "";
             let prev = null;
-            
-            if (week > 1) {
-                prev = monthlyWeeklyCounts[m]?.[week - 1] || 0;
-            } else if (week === 1 && monthIndex > 0) {
-                const prevMonth = months[monthIndex - 1];
-                prev = monthlyWeeklyCounts[prevMonth]?.[4] || 0;
-            }
-            
-            return `<td style="padding:10px;border:1px solid #ddd;text-align:center;">${count}${getPercentChange(count, prev)}</td>`;
+            if (week > 1) prev = monthlyWeeklyCounts[m]?.[week - 1] ?? null;
+            else if (week === 1 && idx > 0) prev = monthlyWeeklyCounts[months[idx - 1]]?.[maxWeeks] ?? null;
+            return `<td style="padding:10px;border:1px solid #ddd;text-align:center;">${count !== "" ? count + getPercentChange(count, prev) : ""}</td>`;
         }).join("");
-
         tbody.innerHTML += `<tr style="background:${week % 2 ? "white" : "#f9f9f9"};">
             <td style="padding:10px;border:1px solid #ddd;font-weight:bold;text-align:center;">Week ${week}</td>
             ${row}
         </tr>`;
     }
 
+    // Monthly Totals
     let grandTotal = 0;
     const totalRow = months.map((m,i) => {
-        const total = Object.values(monthlyWeeklyCounts[m] || {}).reduce((a,b) => a+b,0);
+        const total = Object.values(monthlyWeeklyCounts[m] || {}).reduce((a,b)=>a+b,0);
         grandTotal += total;
         const prev = i>0 ? Object.values(monthlyWeeklyCounts[months[i-1]] || {}).reduce((a,b)=>a+b,0) : null;
         return `<td style="padding:12px;border:1px solid #ddd;text-align:center;"><strong>${total}${getPercentChange(total, prev)}</strong></td>`;
     }).join("");
-
     tbody.innerHTML += `<tr style="background:#f0f1f2;color:white;font-weight:bold;">
         <td style="padding:12px;border:1px solid #ddd;text-align:center;">Monthly Total</td>${totalRow}
     </tr>`;
@@ -158,7 +155,7 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
         <div style="background:#f5f5f5;padding:20px;border-radius:8px;margin-top:20px;">
             <h4 style="margin:0 0 15px;color:#333;font-size:0.9em">Lead Generation Summary for ${year}</h4>
             <div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.9em">
-                <div><strong>Filtered Leads:</strong> <span style="color:#2196F3;font-size:1.2em;">${grandTotal}</span></div>
+                <div><strong>Total Leads:</strong> <span style="color:#2196F3;font-size:1.2em;">${grandTotal}</span></div>
                 <div><strong>Total Fetched:</strong> ${totalFiltered}</div>
                 <div><strong>Report Period:</strong> Jan - Dec ${year}</div>
                 <div><strong>Generated:</strong> ${new Date().toLocaleString()}</div>
@@ -169,42 +166,43 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
         </div>`;
 }
 
+/*************************************
+ * PAGE LOAD
+ *************************************/
 ZOHO.embeddedApp.on("PageLoad", async () => {
-    const targetYear = new Date().getFullYear();
+    const year = new Date().getFullYear();
+
     document.body.innerHTML = `
         <div id="loadingDiv" style="text-align:center;padding:40px;background:#e3f2fd;border-radius:8px;margin:20px;">
-            <h2>Loading Filtered Lead Data for ${targetYear}</h2>
+            <h2>Loading Lead Data for ${year}</h2>
             <p>Applying Lead Source and Zoho Service filters...</p>
         </div>
         <table id="leadsTable" style="border-collapse:collapse;width:100%;margin:20px 0;"><thead></thead><tbody></tbody></table>
         <div id="footerNote"></div>`;
 
     try {
-        const filteredLeads = await fetchFilteredLeads();
-        
-        if (!filteredLeads.length) {
-            document.body.innerHTML = `
-                <div style="text-align:center;padding:40px;background:#fff3cd;border-radius:8px;margin:20px;border-left:5px solid #ffc107;">
-                    <h2>No Matching Leads Found</h2>
-                    <p>No leads found matching the specified Lead Source and Zoho Service criteria.</p>
-                </div>`;
+        const leads = await fetchFilteredLeadsCOQL();
+
+        if (!leads.length) {
+            document.body.innerHTML = `<div style="text-align:center;padding:40px;background:#fff3cd;border-radius:8px;margin:20px;border-left:5px solid #ffc107;">
+                <h2>No Matching Leads Found</h2>
+                <p>No leads found matching the specified Lead Source and Zoho Service criteria.</p>
+            </div>`;
             return;
         }
 
-        const monthlyWeeklyCounts = groupLeadsByMonthWeek(filteredLeads, targetYear);
-        renderTable(monthlyWeeklyCounts, targetYear, filteredLeads.length);
-        
-        document.getElementById("loadingDiv").style.display = "none";
+        const grouped = groupLeadsByMonthWeek(leads, year);
+        renderTable(grouped, year, leads.length);
 
-    } catch (err) {
-        document.body.innerHTML = `
-            <div style="text-align:center;padding:40px;background:#f8d7da;border-radius:8px;margin:20px;border-left:5px solid #dc3545;">
-                <h2>Error Loading Report</h2>
-                <p><strong>${err.message}</strong></p>
-                <button onclick="location.reload()" style="padding:10px 20px;background:#007bff;color:white;border:none;border-radius:5px;cursor:pointer;">
-                    Retry
-                </button>
-            </div>`;
+        document.getElementById("loadingDiv").style.display = "none";
+    } catch(err) {
+        document.body.innerHTML = `<div style="text-align:center;padding:40px;background:#f8d7da;border-radius:8px;margin:20px;border-left:5px solid #dc3545;">
+            <h2>Error Loading Report</h2>
+            <p><strong>${err.message}</strong></p>
+            <button onclick="location.reload()" style="padding:10px 20px;background:#007bff;color:white;border:none;border-radius:5px;cursor:pointer;">
+                Retry
+            </button>
+        </div>`;
     }
 });
 
