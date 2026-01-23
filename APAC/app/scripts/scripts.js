@@ -3,6 +3,16 @@ const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct"
 const formatMonth = (date) => `${MONTH_NAMES[date.getMonth()]} ${date.getFullYear()}`;
 const getAllMonthsOfYear = (year) => MONTH_NAMES.map(m => `${m} ${year}`);
 
+// Helper function to get the number of weeks in a month
+function getWeeksInMonth(year, month) {
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const lastDate = lastDay.getDate();
+    
+    // Calculate weeks based on the last date
+    return Math.ceil(lastDate / 7);
+}
+
 async function fetchFilteredLeads() {
     const leadSources = [
         "Zoho Leads", "Zoho Partner", "Zoho CRM", "Zoho Partners 2024",
@@ -52,9 +62,23 @@ async function fetchFilteredLeads() {
 }
 
 function groupLeadsByMonthWeek(leads, year) {
-    const grouped = Object.fromEntries(
-        getAllMonthsOfYear(year).map(m => [m, {1:0,2:0,3:0,4:0}])
-    );
+    // Initialize with dynamic week counts per month
+    const grouped = {};
+    
+    for (let monthIndex = 0; monthIndex < 12; monthIndex++) {
+        const monthKey = `${MONTH_NAMES[monthIndex]} ${year}`;
+        const weeksInMonth = getWeeksInMonth(year, monthIndex);
+        
+        grouped[monthKey] = {
+            weeks: {},
+            maxWeeks: weeksInMonth
+        };
+        
+        // Initialize all weeks for this month
+        for (let w = 1; w <= weeksInMonth; w++) {
+            grouped[monthKey].weeks[w] = 0;
+        }
+    }
 
     leads.forEach(lead => {
         const createdTimeValue = lead.Created_Time || lead.created_time || 
@@ -75,8 +99,15 @@ function groupLeadsByMonthWeek(leads, year) {
             const monthKey = formatMonth(createdDate);
             if (!grouped[monthKey]) return;
 
-            const week = Math.min(4, Math.max(1, Math.ceil(createdDate.getDate() / 7)));
-            grouped[monthKey][week]++;
+            const week = Math.ceil(createdDate.getDate() / 7);
+            const maxWeeks = grouped[monthKey].maxWeeks;
+            
+            // Ensure week doesn't exceed the actual weeks in the month
+            const adjustedWeek = Math.min(week, maxWeeks);
+            
+            if (grouped[monthKey].weeks[adjustedWeek] !== undefined) {
+                grouped[monthKey].weeks[adjustedWeek]++;
+            }
         } catch (dateErr) {
             console.error('Date parsing error:', dateErr);
         }
@@ -115,22 +146,35 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
     thead.innerHTML = tbody.innerHTML = "";
 
     const months = getAllMonthsOfYear(year);
+    
+    // Find the maximum number of weeks across all months
+    const maxWeeks = Math.max(...months.map(m => monthlyWeeklyCounts[m]?.maxWeeks || 4));
 
     thead.innerHTML = `<tr style="background:#4CAF50;color:white;">
         <th style="padding:12px;border:1px solid #ddd;text-align:center;">Week</th>
         ${months.map(m => `<th style="padding:12px;border:1px solid #ddd;text-align:center;">${m}</th>`).join("")}
     </tr>`;
 
-    for (let week = 1; week <= 4; week++) {
+    for (let week = 1; week <= maxWeeks; week++) {
         const row = months.map((m, monthIndex) => {
-            const count = monthlyWeeklyCounts[m]?.[week] || 0;
+            const monthData = monthlyWeeklyCounts[m];
+            const hasThisWeek = monthData && week <= monthData.maxWeeks;
+            const count = hasThisWeek ? (monthData.weeks[week] || 0) : null;
+            
+            if (count === null) {
+                return `<td style="padding:10px;border:1px solid #ddd;text-align:center;background:#f5f5f5;">—</td>`;
+            }
+            
             let prev = null;
             
             if (week > 1) {
-                prev = monthlyWeeklyCounts[m]?.[week - 1] || 0;
+                prev = monthData.weeks[week - 1] || 0;
             } else if (week === 1 && monthIndex > 0) {
                 const prevMonth = months[monthIndex - 1];
-                prev = monthlyWeeklyCounts[prevMonth]?.[4] || 0;
+                const prevMonthData = monthlyWeeklyCounts[prevMonth];
+                if (prevMonthData) {
+                    prev = prevMonthData.weeks[prevMonthData.maxWeeks] || 0;
+                }
             }
             
             return `<td style="padding:10px;border:1px solid #ddd;text-align:center;">${count}${getPercentChange(count, prev)}</td>`;
@@ -143,10 +187,14 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
     }
 
     let grandTotal = 0;
-    const totalRow = months.map((m,i) => {
-        const total = Object.values(monthlyWeeklyCounts[m] || {}).reduce((a,b) => a+b,0);
+    const totalRow = months.map((m, i) => {
+        const monthData = monthlyWeeklyCounts[m];
+        const total = monthData ? Object.values(monthData.weeks).reduce((a, b) => a + b, 0) : 0;
         grandTotal += total;
-        const prev = i>0 ? Object.values(monthlyWeeklyCounts[months[i-1]] || {}).reduce((a,b)=>a+b,0) : null;
+        
+        const prevMonthData = i > 0 ? monthlyWeeklyCounts[months[i - 1]] : null;
+        const prev = prevMonthData ? Object.values(prevMonthData.weeks).reduce((a, b) => a + b, 0) : null;
+        
         return `<td style="padding:12px;border:1px solid #ddd;text-align:center;"><strong>${total}${getPercentChange(total, prev)}</strong></td>`;
     }).join("");
 
@@ -164,7 +212,7 @@ function renderTable(monthlyWeeklyCounts, year, totalFiltered) {
                 <div><strong>Generated:</strong> ${new Date().toLocaleString()}</div>
             </div>
             <p style="margin-top:15px;color:#666;font-size:0.9em;">
-                Week-over-week and month-over-month percentage changes shown.
+                Week-over-week and month-over-month percentage changes shown. Months with 5 weeks are fully supported.
             </p>
         </div>`;
 }
